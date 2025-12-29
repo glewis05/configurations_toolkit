@@ -228,6 +228,49 @@ class ConfigurationManager:
         print(f"Created program: {name} ({program_id})")
         return program_id
 
+    def get_program_id(self, identifier: str) -> Optional[str]:
+        """
+        Get program_id by prefix or name.
+
+        PURPOSE: Quick lookup helper for CLI and MCP tools
+
+        PARAMETERS:
+            identifier: Program prefix (e.g., "P4M") or name
+
+        RETURNS:
+            program_id string or None if not found
+        """
+        program = self.get_program_by_prefix(identifier)
+        return program['program_id'] if program else None
+
+    def get_clinic_id(self, program_id: str, name: str) -> Optional[str]:
+        """
+        Get clinic_id by name within a program.
+
+        PARAMETERS:
+            program_id: Parent program ID
+            name: Clinic name
+
+        RETURNS:
+            clinic_id string or None if not found
+        """
+        clinic = self.get_clinic_by_name(program_id, name)
+        return clinic['clinic_id'] if clinic else None
+
+    def get_location_id(self, clinic_id: str, name: str) -> Optional[str]:
+        """
+        Get location_id by name within a clinic.
+
+        PARAMETERS:
+            clinic_id: Parent clinic ID
+            name: Location name
+
+        RETURNS:
+            location_id string or None if not found
+        """
+        location = self.get_location_by_name(clinic_id, name)
+        return location['location_id'] if location else None
+
     def get_program_by_prefix(self, identifier: str) -> Optional[Dict]:
         """
         Look up a program by prefix OR name.
@@ -312,6 +355,57 @@ class ConfigurationManager:
 
         self.conn.commit()
         return relationship_id
+
+    def list_programs(self, include_hierarchy: bool = True) -> List[Dict]:
+        """
+        List all programs with optional clinic/location hierarchy.
+
+        PURPOSE: Get overview of all programs in the system
+
+        PARAMETERS:
+            include_hierarchy: If True, include clinics and locations for each program
+
+        RETURNS:
+            List of program dicts, each with optional 'clinics' list
+
+        EXAMPLE:
+            programs = cm.list_programs()
+            for p in programs:
+                print(f"{p['name']} ({p['prefix']})")
+                for clinic in p.get('clinics', []):
+                    print(f"  - {clinic['name']}")
+        """
+        cursor = self.conn.cursor()
+
+        # Get all programs
+        cursor.execute("""
+            SELECT * FROM programs
+            ORDER BY name
+        """)
+        programs = [dict(row) for row in cursor.fetchall()]
+
+        if include_hierarchy:
+            for program in programs:
+                # Get clinics for this program
+                cursor.execute("""
+                    SELECT * FROM clinics
+                    WHERE program_id = ?
+                    ORDER BY name
+                """, (program['program_id'],))
+                clinics = [dict(row) for row in cursor.fetchall()]
+
+                # Get locations for each clinic
+                for clinic in clinics:
+                    cursor.execute("""
+                        SELECT * FROM locations
+                        WHERE clinic_id = ?
+                        ORDER BY name
+                    """, (clinic['clinic_id'],))
+                    clinic['locations'] = [dict(row) for row in cursor.fetchall()]
+
+                program['clinics'] = clinics
+
+        return programs
 
     def get_attached_programs(self, program_id: str) -> List[Dict]:
         """
