@@ -1,0 +1,594 @@
+# ============================================================================
+# CONFIGURATION DEFINITIONS
+# All possible configuration fields for clinic/program setup
+#
+# PURPOSE: Define the schema for all system configurations
+#
+# R EQUIVALENT: Like a data dictionary that defines all possible columns
+# and their types, allowed values, and defaults
+#
+# AVIATION ANALOGY: Like the Master Minimum Equipment List (MMEL) -
+# defines all the items that can be configured and their requirements
+#
+# KEY CONCEPT: Area vs Clinic
+# "Portland" and "Montana" are geographic AREAS, not clinics.
+# The actual clinics are the service locations:
+#   - Portland Area → PCI Breast Surgery West, PCI Franz, etc.
+#   - Montana Area → (will have its own service locations)
+# The hierarchy is: Program → Locations (no intermediate "area" level)
+# ============================================================================
+
+# ----------------------------------------------------------------------------
+# CATEGORIES
+# Groups of related configuration fields
+# Display order determines order in Configuration Matrix export
+# ----------------------------------------------------------------------------
+categories:
+  - name: appointment_extract
+    display_name: "Appointment Extract"
+    description: "Filtering rules for appointment data extraction from EHR"
+    display_order: 1
+
+  - name: invitation
+    display_name: "Invitation"
+    description: "Initial invitation timing and communication channels"
+    display_order: 2
+
+  - name: reminder
+    display_name: "Reminder"
+    description: "Follow-up reminder timing and frequency settings"
+    display_order: 3
+
+  - name: helpdesk
+    display_name: "Helpdesk"
+    description: "Clinical help desk contact information"
+    display_order: 4
+
+  - name: lab_order
+    display_name: "Lab Order"
+    description: "Default laboratory, test panels, and sample types"
+    display_order: 5
+
+  - name: operations
+    display_name: "Operations"
+    description: "Operating hours, file ingestion, and operational settings"
+    display_order: 6
+
+  - name: signature_block
+    display_name: "Signature Block"
+    description: "Email and SMS signature text by location"
+    display_order: 7
+
+  - name: sms
+    display_name: "SMS"
+    description: "SMS campaign and messaging settings"
+    display_order: 8
+
+  - name: tc_scoring
+    display_name: "TC Scoring"
+    description: "Tyrer-Cuzick scoring configuration and rules"
+    display_order: 9
+
+  - name: versions
+    display_name: "Versions"
+    description: "Engine, algorithm, and experience version identifiers"
+    display_order: 10
+
+  - name: assessment
+    display_name: "Assessment"
+    description: "Risk assessment lockout and timing rules"
+    display_order: 11
+
+  - name: providers
+    display_name: "Provider Information"
+    description: "Ordering providers and NPI numbers"
+    display_order: 12
+
+# ----------------------------------------------------------------------------
+# DEFINITIONS
+# Each configurable field with its properties
+# ----------------------------------------------------------------------------
+definitions:
+
+  # ==========================================================================
+  # APPOINTMENT EXTRACT
+  # Controls how patient appointments are filtered from EHR
+  # ==========================================================================
+
+  - config_key: extract_patient_status
+    category: appointment_extract
+    display_name: "Patient Status Filter"
+    description: "Which patient statuses to include in the extract"
+    data_type: text
+    allowed_values: ["New", "Established", "All"]
+    default_value: "All"
+    applies_to: program
+    is_required: false
+    is_clinic_editable: false
+    display_order: 1
+
+  - config_key: extract_providers
+    category: appointment_extract
+    display_name: "Extract Providers"
+    description: "Providers to include in appointment extract by location"
+    data_type: text
+    applies_to: location
+    is_required: false
+    is_clinic_editable: false
+    display_order: 2
+
+  - config_key: extract_lookback_days
+    category: appointment_extract
+    display_name: "Extract Lookback (Days)"
+    description: "How many days back to look for appointments"
+    data_type: number
+    default_value: "30"
+    applies_to: program
+    is_required: false
+    is_clinic_editable: false
+    display_order: 3
+
+  - config_key: extract_lookahead_days
+    category: appointment_extract
+    display_name: "Extract Lookahead (Days)"
+    description: "How many days ahead to look for appointments"
+    data_type: number
+    default_value: "14"
+    applies_to: program
+    is_required: false
+    is_clinic_editable: false
+    display_order: 4
+
+  # ==========================================================================
+  # INVITATION
+  # Initial patient invitation settings
+  # ==========================================================================
+
+  - config_key: invitation_days_before
+    category: invitation
+    display_name: "Invitation Days Before Appointment"
+    description: "How many days before appointment to send initial invitation"
+    data_type: number
+    default_value: "7"
+    applies_to: program
+    is_required: true
+    is_clinic_editable: false
+    display_order: 1
+
+  - config_key: invitation_channels
+    category: invitation
+    display_name: "Invitation Channels"
+    description: "Communication channels for invitations"
+    data_type: json
+    default_value: '["email", "sms"]'
+    allowed_values: '["email", "sms", "both"]'
+    applies_to: program
+    is_required: true
+    is_clinic_editable: true
+    display_order: 2
+
+  - config_key: invitation_time_of_day
+    category: invitation
+    display_name: "Invitation Send Time"
+    description: "Time of day to send invitations"
+    data_type: time
+    default_value: "09:00"
+    applies_to: program
+    is_required: false
+    is_clinic_editable: false
+    display_order: 3
+
+  # ==========================================================================
+  # REMINDER
+  # Follow-up reminder settings
+  # ==========================================================================
+
+  - config_key: reminder_days_before
+    category: reminder
+    display_name: "Reminder Days Before Appointment"
+    description: "How many days before appointment to send first reminder"
+    data_type: number
+    default_value: "3"
+    applies_to: program
+    is_required: true
+    is_clinic_editable: false
+    display_order: 1
+
+  - config_key: reminder_frequency
+    category: reminder
+    display_name: "Reminder Frequency"
+    description: "How often to send reminder messages"
+    data_type: text
+    allowed_values: ["Once", "Daily", "Every 2 Days"]
+    default_value: "Once"
+    applies_to: program
+    is_required: false
+    is_clinic_editable: true
+    display_order: 2
+
+  - config_key: reminder_max_count
+    category: reminder
+    display_name: "Maximum Reminders"
+    description: "Maximum number of reminders to send"
+    data_type: number
+    default_value: "1"
+    applies_to: program
+    is_required: false
+    is_clinic_editable: false
+    display_order: 3
+
+  - config_key: reminder_channels
+    category: reminder
+    display_name: "Reminder Channels"
+    description: "Communication channels for reminders"
+    data_type: json
+    default_value: '["email", "sms"]'
+    applies_to: program
+    is_required: false
+    is_clinic_editable: true
+    display_order: 4
+
+  # ==========================================================================
+  # HELPDESK
+  # Clinical help desk contact information
+  # ==========================================================================
+
+  - config_key: helpdesk_email
+    category: helpdesk
+    display_name: "Helpdesk Email"
+    description: "Email address for patient support inquiries"
+    data_type: email
+    applies_to: location
+    is_required: false
+    is_clinic_editable: true
+    display_order: 1
+
+  - config_key: helpdesk_phone
+    category: helpdesk
+    display_name: "Helpdesk Phone"
+    description: "Phone number for patient support calls"
+    data_type: phone
+    applies_to: location
+    is_required: true
+    is_clinic_editable: true
+    display_order: 2
+
+  - config_key: helpdesk_workflow
+    category: helpdesk
+    display_name: "Helpdesk Escalation Workflow"
+    description: "Instructions if patient contacts helpdesk"
+    data_type: text
+    applies_to: program
+    is_required: false
+    is_clinic_editable: false
+    display_order: 3
+
+  - config_key: helpdesk_hours
+    category: helpdesk
+    display_name: "Helpdesk Hours"
+    description: "Hours when helpdesk is available"
+    data_type: text
+    applies_to: location
+    is_required: false
+    is_clinic_editable: true
+    display_order: 4
+
+  # ==========================================================================
+  # LAB ORDER
+  # Default laboratory and test settings
+  # ==========================================================================
+
+  - config_key: lab_default_name
+    category: lab_order
+    display_name: "Default Lab"
+    description: "Default laboratory for genetic testing"
+    data_type: text
+    allowed_values: ["Ambry", "Invitae", "Myriad", "Other"]
+    applies_to: program
+    is_required: true
+    is_clinic_editable: true
+    display_order: 1
+
+  - config_key: lab_default_test_code
+    category: lab_order
+    display_name: "Default Test Code"
+    description: "Default test panel code"
+    data_type: text
+    applies_to: program
+    is_required: false
+    is_clinic_editable: true
+    display_order: 2
+
+  - config_key: lab_default_test_name
+    category: lab_order
+    display_name: "Default Test Name"
+    description: "Default test panel name"
+    data_type: text
+    applies_to: program
+    is_required: false
+    is_clinic_editable: true
+    display_order: 3
+
+  - config_key: lab_test_modifications
+    category: lab_order
+    display_name: "Test Modifications"
+    description: "Gene modifications, exclusions, etc. (free text)"
+    data_type: text
+    applies_to: program
+    is_required: false
+    is_clinic_editable: false
+    display_order: 4
+
+  - config_key: lab_default_sample
+    category: lab_order
+    display_name: "Default Sample Type"
+    description: "Default sample collection method"
+    data_type: text
+    allowed_values: ["Saliva", "Blood"]
+    default_value: "Saliva"
+    applies_to: program
+    is_required: true
+    is_clinic_editable: false
+    display_order: 5
+
+  - config_key: lab_optional_samples
+    category: lab_order
+    display_name: "Optional Sample Types"
+    description: "Additional sample types available (JSON array)"
+    data_type: json
+    applies_to: program
+    is_required: false
+    is_clinic_editable: true
+    display_order: 6
+
+  - config_key: lab_optional_tests
+    category: lab_order
+    display_name: "Optional Lab Tests"
+    description: "Additional test options (JSON array of {code, name, modifications})"
+    data_type: json
+    applies_to: program
+    is_required: false
+    is_clinic_editable: false
+    display_order: 7
+
+  - config_key: lab_account_number
+    category: lab_order
+    display_name: "Lab Account Number"
+    description: "Clinic's account number with the lab"
+    data_type: text
+    applies_to: program
+    is_required: false
+    is_clinic_editable: false
+    display_order: 8
+
+  # ==========================================================================
+  # OPERATIONS
+  # Operating hours and general operational settings
+  # ==========================================================================
+
+  - config_key: file_ingestion_time
+    category: operations
+    display_name: "Extract File Ingestion Time"
+    description: "When the patient extract file is ingested daily"
+    data_type: time
+    default_value: "07:00"
+    applies_to: program
+    is_required: false
+    is_clinic_editable: false
+    display_order: 1
+
+  - config_key: hours_open
+    category: operations
+    display_name: "Opening Time"
+    description: "Clinic opening time"
+    data_type: time
+    default_value: "08:00"
+    applies_to: location
+    is_required: false
+    is_clinic_editable: true
+    display_order: 2
+
+  - config_key: hours_close
+    category: operations
+    display_name: "Closing Time"
+    description: "Clinic closing time"
+    data_type: time
+    default_value: "17:00"
+    applies_to: location
+    is_required: false
+    is_clinic_editable: true
+    display_order: 3
+
+  - config_key: timezone
+    category: operations
+    display_name: "Timezone"
+    description: "Clinic timezone for scheduling"
+    data_type: text
+    default_value: "America/Los_Angeles"
+    applies_to: program
+    is_required: true
+    is_clinic_editable: false
+    display_order: 4
+
+  # ==========================================================================
+  # SIGNATURE BLOCK
+  # Location-specific signature text for emails and SMS
+  # ==========================================================================
+
+  - config_key: signature_block_email
+    category: signature_block
+    display_name: "Email Signature Block"
+    description: "Signature text appended to email messages"
+    data_type: text
+    applies_to: location
+    is_required: false
+    is_clinic_editable: true
+    display_order: 1
+
+  - config_key: signature_block_sms
+    category: signature_block
+    display_name: "SMS Signature Block"
+    description: "Signature text appended to SMS messages"
+    data_type: text
+    applies_to: location
+    is_required: false
+    is_clinic_editable: true
+    display_order: 2
+
+  # ==========================================================================
+  # SMS
+  # SMS campaign settings
+  # ==========================================================================
+
+  - config_key: sms_aws_approval_destination
+    category: sms
+    display_name: "AWS Campaign Approval Destination"
+    description: "AWS SNS/Pinpoint destination for SMS campaign approval"
+    data_type: text
+    applies_to: program
+    is_required: false
+    is_clinic_editable: false
+    display_order: 1
+
+  - config_key: sms_opt_out_keywords
+    category: sms
+    display_name: "Opt-Out Keywords"
+    description: "Keywords that trigger SMS opt-out (JSON array)"
+    data_type: json
+    default_value: '["STOP", "CANCEL", "UNSUBSCRIBE", "END", "QUIT"]'
+    applies_to: program
+    is_required: false
+    is_clinic_editable: false
+    display_order: 2
+
+  - config_key: sms_sender_id
+    category: sms
+    display_name: "SMS Sender ID"
+    description: "Sender ID or short code for SMS messages"
+    data_type: text
+    applies_to: program
+    is_required: false
+    is_clinic_editable: false
+    display_order: 3
+
+  # ==========================================================================
+  # TC SCORING
+  # Tyrer-Cuzick risk scoring configuration
+  # ==========================================================================
+
+  - config_key: tc_scoring_enabled
+    category: tc_scoring
+    display_name: "TC Scoring Enabled"
+    description: "Whether Tyrer-Cuzick scoring is enabled for this program"
+    data_type: boolean
+    default_value: "true"
+    applies_to: program
+    is_required: true
+    is_clinic_editable: false
+    display_order: 1
+
+  - config_key: tc_minimum_age
+    category: tc_scoring
+    display_name: "Minimum TC Age"
+    description: "Minimum patient age for TC scoring eligibility"
+    data_type: number
+    default_value: "18"
+    applies_to: program
+    is_required: false
+    is_clinic_editable: false
+    display_order: 2
+
+  - config_key: tc_maximum_age
+    category: tc_scoring
+    display_name: "Maximum TC Age"
+    description: "Maximum patient age for TC scoring eligibility"
+    data_type: number
+    default_value: "90"
+    applies_to: program
+    is_required: false
+    is_clinic_editable: false
+    display_order: 3
+
+  - config_key: tc_high_risk_threshold
+    category: tc_scoring
+    display_name: "High Risk Threshold"
+    description: "TC score threshold for high risk classification"
+    data_type: number
+    default_value: "20"
+    applies_to: program
+    is_required: false
+    is_clinic_editable: false
+    display_order: 4
+
+  # ==========================================================================
+  # VERSIONS
+  # Engine and algorithm version tracking
+  # ==========================================================================
+
+  - config_key: version_tc_algorithm
+    category: versions
+    display_name: "TC Algorithm Version"
+    description: "Version of Tyrer-Cuzick algorithm in use"
+    data_type: text
+    applies_to: program
+    is_required: false
+    is_clinic_editable: false
+    display_order: 1
+
+  - config_key: version_nccn_algorithm
+    category: versions
+    display_name: "NCCN Algorithm Version"
+    description: "Version of NCCN guidelines in use"
+    data_type: text
+    applies_to: program
+    is_required: false
+    is_clinic_editable: false
+    display_order: 2
+
+  - config_key: version_econsent
+    category: versions
+    display_name: "eConsent Version"
+    description: "Version of electronic consent form"
+    data_type: text
+    applies_to: program
+    is_required: false
+    is_clinic_editable: false
+    display_order: 3
+
+  - config_key: version_risk_assessment
+    category: versions
+    display_name: "Risk Assessment Experience Version"
+    description: "Version of the risk assessment user experience"
+    data_type: text
+    applies_to: program
+    is_required: false
+    is_clinic_editable: false
+    display_order: 4
+
+  # ==========================================================================
+  # ASSESSMENT
+  # Risk assessment lockout and timing rules
+  # ==========================================================================
+
+  - config_key: assessment_lockout_trigger
+    category: assessment
+    display_name: "Assessment Lockout Trigger"
+    description: "When the assessment becomes read-only"
+    data_type: text
+    allowed_values: ["At Appointment", "On Submit", "Manual"]
+    default_value: "At Appointment"
+    applies_to: program
+    is_required: true
+    is_clinic_editable: false
+    display_order: 1
+
+  - config_key: assessment_lockout_period_months
+    category: assessment
+    display_name: "Assessment Lockout Period (Months)"
+    description: "How long the assessment stays read-only before reset"
+    data_type: number
+    default_value: "11"
+    applies_to: program
+    is_required: true
+    is_clinic_editable: false
+    display_order: 2
