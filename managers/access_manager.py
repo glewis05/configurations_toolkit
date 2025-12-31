@@ -1361,6 +1361,306 @@ class AccessManager:
 
         return results
 
+    def process_review_response(
+        self,
+        file_path: str,
+        reviewed_by: str,
+        preview_only: bool = True
+    ) -> Dict[str, Any]:
+        """
+        Process a completed annual access review response file.
+
+        PURPOSE: Import clinic manager's review decisions (keep/terminate/update).
+
+        PARAMETERS:
+            file_path: Path to completed Excel review file
+            reviewed_by: Who completed the review (clinic manager name)
+            preview_only: If True, show what would happen without making changes
+
+        RETURNS:
+            Dict with preview actions, summary counts, and any errors
+
+        ACTION LOGIC:
+            - Blank/empty → Recertify (mark as reviewed, set next review date)
+            - "Terminate" → Revoke access with reason from Manager Notes
+            - "Update" → Change role to New Role value, then mark as reviewed
+
+        EXAMPLE:
+            result = am.process_review_response(
+                file_path="~/Downloads/Franz_Review_Completed.xlsx",
+                reviewed_by="Jerry Cain",
+                preview_only=True
+            )
+        """
+        import pandas as pd
+
+        # Valid role values
+        VALID_ROLES = ['Read-Write-Order', 'Read-Write', 'Read-Only', 'Admin', 'Provider', 'Coordinator', 'Auditor']
+
+        # Expand path and read Excel
+        file_path = os.path.expanduser(file_path)
+        if not os.path.exists(file_path):
+            raise FileNotFoundError(f"File not found: {file_path}")
+
+        df = pd.read_excel(file_path)
+
+        # Normalize column names
+        df.columns = [col.strip() for col in df.columns]
+
+        # Check for required columns
+        required_cols = ['Email', 'Action']
+        missing_cols = [col for col in required_cols if col not in df.columns]
+        if missing_cols:
+            raise ValueError(f"Missing required columns: {missing_cols}. Is this a review status export file?")
+
+        results = {
+            'preview': [],
+            'summary': {
+                'total_rows': len(df),
+                'recertified': 0,
+                'terminated': 0,
+                'updated': 0,
+                'skipped': 0,
+                'errors': 0
+            },
+            'errors': [],
+            'preview_only': preview_only
+        }
+
+        cursor = self.conn.cursor()
+        today = date.today()
+
+        for idx, row in df.iterrows():
+            row_num = idx + 2  # Excel row number
+
+            try:
+                email = str(row.get('Email', '')).strip().lower()
+                action = str(row.get('Action', '')).strip()
+                new_role = str(row.get('New Role', '')).strip()
+                manager_notes = str(row.get('Manager Notes', '')).strip()
+                program = str(row.get('Program', '')).strip()
+                clinic = str(row.get('Clinic', '')).strip()
+                current_role = str(row.get('Role', '')).strip()
+
+                # Skip rows without email
+                if not email or email == 'nan' or '@' not in email:
+                    results['summary']['skipped'] += 1
+                    continue
+
+                # Clean up nan values
+                if action.lower() == 'nan':
+                    action = ''
+                if new_role.lower() == 'nan':
+                    new_role = ''
+                if manager_notes.lower() == 'nan':
+                    manager_notes = ''
+
+                # Find the user
+                cursor.execute("SELECT user_id, name FROM users WHERE LOWER(email) = ?", (email,))
+                user_row = cursor.fetchone()
+
+                if not user_row:
+                    results['errors'].append({
+                        'row': row_num,
+                        'email': email,
+                        'error': 'User not found in database'
+                    })
+                    results['summary']['errors'] += 1
+                    continue
+
+                user_id = user_row['user_id']
+                user_name = user_row['name']
+
+                # Find the access grant for this program/clinic
+                # We need to match on program and clinic from the review file
+                query = """
+                    SELECT ua.access_id, ua.role, ua.program_id, ua.clinic_id,
+                           p.name as program_name, c.name as clinic_name
+                    FROM user_access ua
+                    JOIN programs p ON ua.program_id = p.program_id
+                    LEFT JOIN clinics c ON ua.clinic_id = c.clinic_id
+                    WHERE ua.user_id = ? AND ua.is_active = TRUE
+                """
+                params = [user_id]
+
+                cursor.execute(query, params)
+                access_grants = cursor.fetchall()
+
+                # Find matching access grant
+                matching_access = None
+                for grant in access_grants:
+                    grant_program = grant['program_name'] or ''
+                    grant_clinic = grant['clinic_name'] or ''
+
+                    # Match on program and clinic (clinic may be empty)
+                    if program and grant_program.lower() == program.lower():
+                        if clinic and clinic.lower() != 'nan':
+                            if grant_clinic.lower() == clinic.lower():
+                                matching_access = grant
+                                break
+                        else:
+                            # No clinic specified, match on program only
+                            matching_access = grant
+                            break
+
+                if not matching_access:
+                    results['errors'].append({
+                        'row': row_num,
+                        'email': email,
+                        'error': f'No active access found for program: {program}, clinic: {clinic}'
+                    })
+                    results['summary']['errors'] += 1
+                    continue
+
+                access_id = matching_access['access_id']
+
+                # Build action record
+                action_record = {
+                    'row': row_num,
+                    'name': user_name,
+                    'email': email,
+                    'program': program,
+                    'clinic': clinic or '(Program-wide)',
+                    'current_role': matching_access['role'],
+                    'action': None,
+                    'details': None
+                }
+
+                # Process based on action value
+                action_upper = action.upper().strip()
+
+                if action_upper == '' or action_upper == 'KEEP':
+                    # Recertify - mark as reviewed
+                    action_record['action'] = 'RECERTIFY'
+                    action_record['details'] = 'Access confirmed, next review scheduled'
+
+                    if not preview_only:
+                        self.conduct_review(
+                            access_id=access_id,
+                            reviewed_by=reviewed_by,
+                            status='Certified',
+                            notes=manager_notes if manager_notes else 'Annual review - access confirmed'
+                        )
+
+                    results['summary']['recertified'] += 1
+
+                elif action_upper == 'TERMINATE':
+                    # Revoke access
+                    if not manager_notes:
+                        results['errors'].append({
+                            'row': row_num,
+                            'email': email,
+                            'error': 'Manager Notes required for Terminate action'
+                        })
+                        results['summary']['errors'] += 1
+                        continue
+
+                    action_record['action'] = 'TERMINATE'
+                    action_record['details'] = f'Revoke access. Reason: {manager_notes}'
+
+                    if not preview_only:
+                        self.revoke_access(
+                            access_id=access_id,
+                            revoked_by=reviewed_by,
+                            reason=manager_notes
+                        )
+
+                    results['summary']['terminated'] += 1
+
+                elif action_upper == 'UPDATE':
+                    # Update role
+                    if not new_role:
+                        results['errors'].append({
+                            'row': row_num,
+                            'email': email,
+                            'error': 'New Role required for Update action'
+                        })
+                        results['summary']['errors'] += 1
+                        continue
+
+                    # Normalize role value
+                    role_map = {
+                        'READ-WRITE-ORDER': 'Read-Write-Order',
+                        'READ + WRITE + ORDER': 'Read-Write-Order',
+                        'READ-WRITE': 'Read-Write',
+                        'READ + WRITE': 'Read-Write',
+                        'READ-ONLY': 'Read-Only',
+                        'READ ONLY': 'Read-Only',
+                        'ADMIN': 'Admin',
+                        'PROVIDER': 'Provider',
+                        'COORDINATOR': 'Coordinator',
+                        'AUDITOR': 'Auditor',
+                    }
+                    normalized_role = role_map.get(new_role.upper(), new_role)
+
+                    if normalized_role not in VALID_ROLES:
+                        results['errors'].append({
+                            'row': row_num,
+                            'email': email,
+                            'error': f'Invalid New Role: {new_role}. Must be one of: {VALID_ROLES}'
+                        })
+                        results['summary']['errors'] += 1
+                        continue
+
+                    action_record['action'] = 'UPDATE'
+                    action_record['new_role'] = normalized_role
+                    action_record['details'] = f'Change role from {matching_access["role"]} to {normalized_role}'
+                    if manager_notes:
+                        action_record['details'] += f'. Reason: {manager_notes}'
+
+                    if not preview_only:
+                        # Update the role
+                        cursor.execute("""
+                            UPDATE user_access
+                            SET role = ?, updated_date = CURRENT_TIMESTAMP
+                            WHERE access_id = ?
+                        """, (normalized_role, access_id))
+
+                        # Log audit
+                        self._log_audit(
+                            entity_type='user_access',
+                            entity_id=str(access_id),
+                            action='UPDATE',
+                            old_value=json.dumps({'role': matching_access['role']}),
+                            new_value=json.dumps({'role': normalized_role}),
+                            changed_by=reviewed_by,
+                            reason=manager_notes if manager_notes else 'Annual review - role updated'
+                        )
+
+                        # Complete the review
+                        self.conduct_review(
+                            access_id=access_id,
+                            reviewed_by=reviewed_by,
+                            status='Modified',
+                            notes=f"Role changed from {matching_access['role']} to {normalized_role}. {manager_notes}"
+                        )
+
+                    results['summary']['updated'] += 1
+
+                else:
+                    results['errors'].append({
+                        'row': row_num,
+                        'email': email,
+                        'error': f'Invalid Action: {action}. Must be blank, Terminate, or Update'
+                    })
+                    results['summary']['errors'] += 1
+                    continue
+
+                results['preview'].append(action_record)
+
+            except Exception as e:
+                results['errors'].append({
+                    'row': row_num,
+                    'email': str(row.get('Email', 'unknown')),
+                    'error': str(e)
+                })
+                results['summary']['errors'] += 1
+
+        if not preview_only:
+            self.conn.commit()
+
+        return results
+
     # =========================================================================
     # TRAINING OPERATIONS
     # =========================================================================
@@ -1788,6 +2088,239 @@ class AccessManager:
 
         return [dict(row) for row in cursor.fetchall()]
 
+    def get_all_terminated_users(
+        self,
+        include_access_history: bool = True,
+        since_date: str = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Get ALL terminated users with their access history.
+
+        PURPOSE: Full terminated user audit - shows everyone who was terminated,
+                 when they were terminated, and confirms their access was revoked.
+
+        PARAMETERS:
+            include_access_history: If True, include all access grants (active and revoked)
+            since_date: Only include users terminated on or after this date (ISO format)
+
+        RETURNS:
+            List of terminated user dicts with compliance status
+        """
+        cursor = self.conn.cursor()
+
+        query = """
+            SELECT
+                u.user_id,
+                u.name,
+                u.email,
+                u.organization,
+                u.status,
+                u.is_business_associate,
+                u.created_date,
+                u.updated_date as status_changed_date
+            FROM users u
+            WHERE u.status = 'Terminated'
+        """
+
+        params = []
+
+        if since_date:
+            query += " AND u.updated_date >= ?"
+            params.append(since_date)
+
+        query += " ORDER BY u.updated_date DESC"
+
+        cursor.execute(query, params)
+        terminated_users = [dict(row) for row in cursor.fetchall()]
+
+        for user in terminated_users:
+            user_id = user['user_id']
+
+            # Get termination details from audit_history
+            cursor.execute("""
+                SELECT
+                    changed_by,
+                    change_reason,
+                    changed_date
+                FROM audit_history
+                WHERE record_type = 'user'
+                  AND record_id = ?
+                  AND action = 'TERMINATE'
+                ORDER BY changed_date DESC
+                LIMIT 1
+            """, (user_id,))
+
+            termination_record = cursor.fetchone()
+            if termination_record:
+                user['termination_date'] = termination_record['changed_date']
+                user['terminated_by'] = termination_record['changed_by']
+                user['termination_reason'] = termination_record['change_reason']
+            else:
+                user['termination_date'] = user['status_changed_date']
+                user['terminated_by'] = 'Unknown (pre-audit)'
+                user['termination_reason'] = 'No audit record'
+
+            if include_access_history:
+                cursor.execute("""
+                    SELECT
+                        ua.access_id,
+                        ua.role,
+                        ua.is_active,
+                        ua.granted_date,
+                        ua.granted_by,
+                        ua.revoked_date,
+                        ua.revoked_by,
+                        ua.revoke_reason,
+                        p.name as program_name,
+                        p.prefix as program_prefix,
+                        c.name as clinic_name,
+                        l.name as location_name
+                    FROM user_access ua
+                    JOIN programs p ON ua.program_id = p.program_id
+                    LEFT JOIN clinics c ON ua.clinic_id = c.clinic_id
+                    LEFT JOIN locations l ON ua.location_id = l.location_id
+                    WHERE ua.user_id = ?
+                    ORDER BY ua.granted_date DESC
+                """, (user_id,))
+
+                access_history = [dict(row) for row in cursor.fetchall()]
+                user['access_history'] = access_history
+
+                active_grants = [a for a in access_history if a['is_active']]
+                user['active_access_count'] = len(active_grants)
+                user['total_access_count'] = len(access_history)
+                user['revoked_access_count'] = len(access_history) - len(active_grants)
+
+                if active_grants:
+                    user['compliance_status'] = 'VIOLATION'
+                    user['compliance_detail'] = f"{len(active_grants)} access grant(s) still active"
+                else:
+                    user['compliance_status'] = 'Compliant'
+                    user['compliance_detail'] = 'All access properly revoked'
+            else:
+                cursor.execute("""
+                    SELECT COUNT(*) as active_count
+                    FROM user_access
+                    WHERE user_id = ? AND is_active = TRUE
+                """, (user_id,))
+
+                active_count = cursor.fetchone()['active_count']
+                user['active_access_count'] = active_count
+                user['compliance_status'] = 'VIOLATION' if active_count > 0 else 'Compliant'
+
+        return terminated_users
+
+    def get_review_status_detail(
+        self,
+        program_id: str = None,
+        include_current: bool = False
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        """
+        Get detailed access review status grouped by urgency.
+
+        PURPOSE: Provide detailed data for access review Excel export.
+
+        PARAMETERS:
+            program_id: Filter to specific program (optional)
+            include_current: If True, include access grants that are current
+
+        RETURNS:
+            Dict with keys: 'overdue', 'due_soon', 'current', 'summary'
+        """
+        cursor = self.conn.cursor()
+
+        today = date.today()
+        due_soon_cutoff = (today + timedelta(days=30)).isoformat()
+        today_str = today.isoformat()
+
+        resolved_program_id = None
+        if program_id:
+            resolved_program_id = self._resolve_program_id(program_id)
+
+        query = """
+            SELECT
+                ua.access_id,
+                ua.user_id,
+                u.name as user_name,
+                u.email,
+                u.organization,
+                ua.role,
+                ua.granted_date,
+                ua.granted_by,
+                ua.review_cycle,
+                ua.next_review_due,
+                p.name as program_name,
+                p.prefix as program_prefix,
+                c.name as clinic_name,
+                l.name as location_name,
+                (SELECT MAX(ar.review_date)
+                 FROM access_reviews ar
+                 WHERE ar.access_id = ua.access_id) as last_review_date,
+                (SELECT ar.reviewed_by
+                 FROM access_reviews ar
+                 WHERE ar.access_id = ua.access_id
+                 ORDER BY ar.review_date DESC
+                 LIMIT 1) as last_reviewed_by
+            FROM user_access ua
+            JOIN users u ON ua.user_id = u.user_id
+            JOIN programs p ON ua.program_id = p.program_id
+            LEFT JOIN clinics c ON ua.clinic_id = c.clinic_id
+            LEFT JOIN locations l ON ua.location_id = l.location_id
+            WHERE ua.is_active = TRUE
+              AND u.status = 'Active'
+        """
+
+        params = []
+
+        if resolved_program_id:
+            query += " AND ua.program_id = ?"
+            params.append(resolved_program_id)
+
+        query += " ORDER BY ua.next_review_due ASC NULLS FIRST"
+
+        cursor.execute(query, params)
+        all_access = [dict(row) for row in cursor.fetchall()]
+
+        result = {
+            'overdue': [],
+            'due_soon': [],
+            'current': []
+        }
+
+        for access in all_access:
+            next_due = access['next_review_due']
+
+            if next_due:
+                next_due_date = date.fromisoformat(next_due)
+                days_diff = (next_due_date - today).days
+                access['days_until_due'] = days_diff
+                access['days_overdue'] = -days_diff if days_diff < 0 else 0
+            else:
+                access['days_until_due'] = None
+                access['days_overdue'] = None
+                access['review_status'] = 'No Review Scheduled'
+
+            if next_due is None or next_due <= today_str:
+                access['review_status'] = 'Overdue'
+                result['overdue'].append(access)
+            elif next_due <= due_soon_cutoff:
+                access['review_status'] = 'Due Soon'
+                result['due_soon'].append(access)
+            else:
+                access['review_status'] = 'Current'
+                if include_current:
+                    result['current'].append(access)
+
+        result['summary'] = {
+            'total_active_access': len(all_access),
+            'overdue_count': len(result['overdue']),
+            'due_soon_count': len(result['due_soon']),
+            'current_count': len(all_access) - len(result['overdue']) - len(result['due_soon']),
+            'as_of_date': today_str
+        }
+
+        return result
+
     def get_external_users(self, program_id: str = None) -> List[Dict[str, Any]]:
         """
         Get all Business Associate users (HIPAA tracking).
@@ -2022,6 +2555,188 @@ class AccessManager:
             ) VALUES (?, ?, ?, ?, ?, ?, ?)
         """, (entity_type, entity_id, action, old_value, new_value,
               changed_by, reason))
+
+    def get_dashboard_data(self) -> Dict[str, Any]:
+        """
+        Get all data needed for the compliance dashboard.
+
+        PURPOSE: Single method to gather all dashboard metrics in one query batch.
+
+        RETURNS:
+            Dict with keys:
+            - immediate_attention: overdue reviews, violations, expired training
+            - upcoming: reviews due in next 30 days
+            - users_by_program: count per program
+            - users_by_clinic: count per clinic
+            - role_distribution: count per role
+            - recent_activity: last 30 days of access grants
+            - totals: overall counts
+            - as_of: timestamp
+        """
+        cursor = self.conn.cursor()
+        today = date.today()
+        thirty_days_ago = (today - timedelta(days=30)).isoformat()
+        thirty_days_ahead = (today + timedelta(days=30)).isoformat()
+        today_str = today.isoformat()
+
+        result = {
+            'immediate_attention': {},
+            'upcoming': {},
+            'users_by_program': [],
+            'users_by_clinic': [],
+            'role_distribution': [],
+            'recent_activity': [],
+            'totals': {},
+            'as_of': datetime.now().isoformat()
+        }
+
+        # --- IMMEDIATE ATTENTION ---
+
+        # Overdue reviews
+        cursor.execute("""
+            SELECT COUNT(*) as count
+            FROM user_access ua
+            JOIN users u ON ua.user_id = u.user_id
+            WHERE ua.is_active = TRUE
+              AND u.status = 'Active'
+              AND (ua.next_review_due IS NULL OR ua.next_review_due <= ?)
+        """, (today_str,))
+        result['immediate_attention']['reviews_overdue'] = cursor.fetchone()['count']
+
+        # Terminated with active access (violations)
+        cursor.execute("""
+            SELECT COUNT(DISTINCT u.user_id) as count
+            FROM users u
+            JOIN user_access ua ON u.user_id = ua.user_id
+            WHERE u.status = 'Terminated'
+              AND ua.is_active = TRUE
+        """)
+        result['immediate_attention']['terminated_violations'] = cursor.fetchone()['count']
+
+        # Expired training
+        cursor.execute("""
+            SELECT COUNT(*) as count
+            FROM user_training ut
+            JOIN users u ON ut.user_id = u.user_id
+            WHERE u.status = 'Active'
+              AND ut.status = 'Expired'
+        """)
+        result['immediate_attention']['training_expired'] = cursor.fetchone()['count']
+
+        # --- UPCOMING ---
+
+        # Reviews due in next 30 days
+        cursor.execute("""
+            SELECT COUNT(*) as count
+            FROM user_access ua
+            JOIN users u ON ua.user_id = u.user_id
+            WHERE ua.is_active = TRUE
+              AND u.status = 'Active'
+              AND ua.next_review_due > ?
+              AND ua.next_review_due <= ?
+        """, (today_str, thirty_days_ahead))
+        result['upcoming']['reviews_due_soon'] = cursor.fetchone()['count']
+
+        # --- USERS BY PROGRAM ---
+
+        cursor.execute("""
+            SELECT
+                p.name as program_name,
+                p.prefix as program_prefix,
+                COUNT(DISTINCT ua.user_id) as user_count,
+                COUNT(DISTINCT ua.clinic_id) as clinic_count
+            FROM user_access ua
+            JOIN programs p ON ua.program_id = p.program_id
+            JOIN users u ON ua.user_id = u.user_id
+            WHERE ua.is_active = TRUE
+              AND u.status = 'Active'
+            GROUP BY p.program_id, p.name, p.prefix
+            ORDER BY user_count DESC
+        """)
+        result['users_by_program'] = [dict(row) for row in cursor.fetchall()]
+
+        # --- USERS BY CLINIC ---
+
+        cursor.execute("""
+            SELECT
+                COALESCE(c.name, '(Program-wide)') as clinic_name,
+                p.name as program_name,
+                COUNT(DISTINCT ua.user_id) as user_count
+            FROM user_access ua
+            JOIN programs p ON ua.program_id = p.program_id
+            LEFT JOIN clinics c ON ua.clinic_id = c.clinic_id
+            JOIN users u ON ua.user_id = u.user_id
+            WHERE ua.is_active = TRUE
+              AND u.status = 'Active'
+            GROUP BY c.clinic_id, c.name, p.name
+            ORDER BY user_count DESC
+        """)
+        result['users_by_clinic'] = [dict(row) for row in cursor.fetchall()]
+
+        # --- ROLE DISTRIBUTION ---
+
+        cursor.execute("""
+            SELECT
+                ua.role,
+                COUNT(*) as count
+            FROM user_access ua
+            JOIN users u ON ua.user_id = u.user_id
+            WHERE ua.is_active = TRUE
+              AND u.status = 'Active'
+            GROUP BY ua.role
+            ORDER BY count DESC
+        """)
+        roles = [dict(row) for row in cursor.fetchall()]
+        total_roles = sum(r['count'] for r in roles)
+        for r in roles:
+            r['percentage'] = round((r['count'] / total_roles * 100), 1) if total_roles > 0 else 0
+        result['role_distribution'] = roles
+
+        # --- RECENT ACTIVITY ---
+
+        cursor.execute("""
+            SELECT
+                ua.granted_date,
+                u.name as user_name,
+                u.email,
+                ua.role,
+                p.name as program_name,
+                COALESCE(c.name, '(Program-wide)') as clinic_name,
+                ua.granted_by
+            FROM user_access ua
+            JOIN users u ON ua.user_id = u.user_id
+            JOIN programs p ON ua.program_id = p.program_id
+            LEFT JOIN clinics c ON ua.clinic_id = c.clinic_id
+            WHERE ua.granted_date >= ?
+            ORDER BY ua.granted_date DESC
+            LIMIT 20
+        """, (thirty_days_ago,))
+        result['recent_activity'] = [dict(row) for row in cursor.fetchall()]
+
+        # Recent activity count (all, not just top 20)
+        cursor.execute("""
+            SELECT COUNT(*) as count
+            FROM user_access
+            WHERE granted_date >= ?
+        """, (thirty_days_ago,))
+        result['totals']['recent_grants_count'] = cursor.fetchone()['count']
+
+        # --- TOTALS ---
+
+        cursor.execute("""
+            SELECT COUNT(DISTINCT user_id) as count
+            FROM users
+            WHERE status = 'Active'
+        """)
+        result['totals']['active_users'] = cursor.fetchone()['count']
+
+        cursor.execute("SELECT COUNT(*) as count FROM programs")
+        result['totals']['total_programs'] = cursor.fetchone()['count']
+
+        cursor.execute("SELECT COUNT(*) as count FROM clinics")
+        result['totals']['total_clinics'] = cursor.fetchone()['count']
+
+        return result
 
     def close(self) -> None:
         """Close the database connection."""
