@@ -2365,6 +2365,359 @@ class AccessManager:
         return [dict(row) for row in cursor.fetchall()]
 
     # =========================================================================
+    # AUDIT COMPLETION OPERATIONS
+    # =========================================================================
+    # These methods support tracking audit completion milestones and generating
+    # compliance documentation for annual access reviews.
+    # =========================================================================
+
+    def update_clinic_manager(self, clinic_id: str, manager_name: str, manager_email: str) -> dict:
+        """
+        Update the clinic manager contact information.
+
+        PURPOSE: Store clinic manager info for audit completion memos
+
+        PARAMETERS:
+            clinic_id: The clinic's ID
+            manager_name: Manager's full name
+            manager_email: Manager's email address
+
+        RETURNS:
+            dict with success status
+
+        EXAMPLE:
+            result = am.update_clinic_manager(
+                clinic_id='KADLEC-001',
+                manager_name='Kellie Kraft',
+                manager_email='Kellie.Kraft@kadlec.org'
+            )
+        """
+        try:
+            cursor = self.conn.cursor()
+
+            cursor.execute("""
+                UPDATE clinics
+                SET manager_name = ?, manager_email = ?, updated_date = CURRENT_TIMESTAMP
+                WHERE clinic_id = ?
+            """, (manager_name, manager_email, clinic_id))
+
+            self.conn.commit()
+
+            return {
+                'success': True,
+                'clinic_id': clinic_id,
+                'manager_name': manager_name,
+                'manager_email': manager_email
+            }
+
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+
+    def record_audit_completion(
+        self,
+        clinic_id: str,
+        program_id: str,
+        audit_year: int,
+        audit_type: str = 'Annual',
+        date_initiated: str = None,
+        date_reviewed: str = None,
+        date_finalized: str = None,
+        date_tickets_submitted: str = None,
+        date_confirmed: str = None,
+        ticket_number: str = None,
+        document_version: str = '1.0',
+        notes: str = None
+    ) -> dict:
+        """
+        Record or update audit completion milestone dates.
+
+        PURPOSE: Track audit workflow milestones for compliance documentation
+
+        PARAMETERS:
+            clinic_id: The clinic's ID
+            program_id: The program's ID
+            audit_year: Year of the audit (e.g., 2025)
+            audit_type: 'Annual' or 'Quarterly'
+            date_initiated: Date roster sent to clinic manager (YYYY-MM-DD)
+            date_reviewed: Date client returned validation (YYYY-MM-DD)
+            date_finalized: Date internal review finalized (YYYY-MM-DD)
+            date_tickets_submitted: Date change tickets sent (YYYY-MM-DD)
+            date_confirmed: Date dev team confirmed (YYYY-MM-DD)
+            ticket_number: Zendesk ticket number
+            document_version: Document version (default '1.0')
+            notes: Optional notes
+
+        RETURNS:
+            dict with success status and completion_id
+
+        WHY THIS APPROACH:
+            We use COALESCE in updates so you can update individual dates
+            without overwriting previously set values with NULL.
+
+        EXAMPLE:
+            result = am.record_audit_completion(
+                clinic_id='KADLEC-001',
+                program_id='P4M',
+                audit_year=2025,
+                date_initiated='2025-09-29',
+                date_reviewed='2025-10-01'
+            )
+        """
+        try:
+            cursor = self.conn.cursor()
+
+            # Check if record already exists
+            cursor.execute("""
+                SELECT completion_id FROM audit_completions
+                WHERE clinic_id = ? AND audit_year = ? AND audit_type = ?
+            """, (clinic_id, audit_year, audit_type))
+
+            existing = cursor.fetchone()
+
+            if existing:
+                # Update existing record - use COALESCE to preserve existing values
+                cursor.execute("""
+                    UPDATE audit_completions SET
+                        date_initiated = COALESCE(?, date_initiated),
+                        date_reviewed = COALESCE(?, date_reviewed),
+                        date_finalized = COALESCE(?, date_finalized),
+                        date_tickets_submitted = COALESCE(?, date_tickets_submitted),
+                        date_confirmed = COALESCE(?, date_confirmed),
+                        ticket_number = COALESCE(?, ticket_number),
+                        document_version = COALESCE(?, document_version),
+                        notes = COALESCE(?, notes),
+                        updated_date = CURRENT_TIMESTAMP
+                    WHERE completion_id = ?
+                """, (
+                    date_initiated, date_reviewed, date_finalized,
+                    date_tickets_submitted, date_confirmed, ticket_number,
+                    document_version, notes, existing['completion_id']
+                ))
+                completion_id = existing['completion_id']
+                action = 'updated'
+            else:
+                # Insert new record
+                cursor.execute("""
+                    INSERT INTO audit_completions (
+                        clinic_id, program_id, audit_year, audit_type,
+                        date_initiated, date_reviewed, date_finalized,
+                        date_tickets_submitted, date_confirmed,
+                        ticket_number, document_version, notes
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    clinic_id, program_id, audit_year, audit_type,
+                    date_initiated, date_reviewed, date_finalized,
+                    date_tickets_submitted, date_confirmed,
+                    ticket_number, document_version, notes
+                ))
+                completion_id = cursor.lastrowid
+                action = 'created'
+
+            self.conn.commit()
+
+            return {
+                'success': True,
+                'completion_id': completion_id,
+                'action': action,
+                'audit_year': audit_year,
+                'audit_type': audit_type
+            }
+
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+
+    def get_audit_completion(self, clinic_id: str, audit_year: int, audit_type: str = 'Annual') -> dict:
+        """
+        Get audit completion record with calculated metrics.
+
+        PURPOSE: Retrieve all data needed for audit completion memo generation
+
+        PARAMETERS:
+            clinic_id: The clinic's ID
+            audit_year: Year of the audit
+            audit_type: 'Annual' or 'Quarterly'
+
+        RETURNS:
+            dict with all audit completion data including calculated metrics
+            from access_reviews table
+
+        EXAMPLE:
+            data = am.get_audit_completion('KADLEC-001', 2025, 'Annual')
+            print(data['total_reviewed'])  # 15
+            print(data['revocations'])     # 2
+        """
+        try:
+            cursor = self.conn.cursor()
+
+            # Get the completion record with clinic and program info
+            cursor.execute("""
+                SELECT ac.*, c.name as clinic_name, c.manager_name, c.manager_email,
+                       p.name as program_name, p.prefix as program_prefix
+                FROM audit_completions ac
+                JOIN clinics c ON ac.clinic_id = c.clinic_id
+                JOIN programs p ON ac.program_id = p.program_id
+                WHERE ac.clinic_id = ? AND ac.audit_year = ? AND ac.audit_type = ?
+            """, (clinic_id, audit_year, audit_type))
+
+            record = cursor.fetchone()
+            if not record:
+                return {'success': False, 'error': 'Audit completion record not found'}
+
+            # Calculate metrics from access_reviews for this clinic in the audit year
+            cursor.execute("""
+                SELECT
+                    COUNT(*) as total_reviewed,
+                    SUM(CASE WHEN status = 'Revoked' THEN 1 ELSE 0 END) as revocations,
+                    SUM(CASE WHEN status = 'Modified' THEN 1 ELSE 0 END) as modifications
+                FROM access_reviews ar
+                JOIN user_access ua ON ar.access_id = ua.access_id
+                WHERE ua.clinic_id = ?
+                AND strftime('%Y', ar.review_date) = ?
+            """, (clinic_id, str(audit_year)))
+
+            metrics = cursor.fetchone()
+
+            # Count new access grants in the audit year
+            cursor.execute("""
+                SELECT COUNT(*) as new_requests
+                FROM user_access
+                WHERE clinic_id = ?
+                AND strftime('%Y', granted_date) = ?
+            """, (clinic_id, str(audit_year)))
+
+            new_grants = cursor.fetchone()
+
+            return {
+                'success': True,
+                'completion_id': record['completion_id'],
+                'clinic_id': record['clinic_id'],
+                'clinic_name': record['clinic_name'],
+                'program_id': record['program_id'],
+                'program_name': record['program_name'],
+                'manager_name': record['manager_name'] or '(Not Set)',
+                'manager_email': record['manager_email'] or '(Not Set)',
+                'audit_year': record['audit_year'],
+                'audit_type': record['audit_type'],
+                'date_initiated': record['date_initiated'],
+                'date_reviewed': record['date_reviewed'],
+                'date_finalized': record['date_finalized'],
+                'date_tickets_submitted': record['date_tickets_submitted'],
+                'date_confirmed': record['date_confirmed'],
+                'ticket_number': record['ticket_number'],
+                'document_version': record['document_version'],
+                'notes': record['notes'],
+                # Calculated metrics from access_reviews
+                'total_reviewed': metrics['total_reviewed'] if metrics else 0,
+                'revocations': metrics['revocations'] if metrics else 0,
+                'modifications': metrics['modifications'] if metrics else 0,
+                'new_requests': new_grants['new_requests'] if new_grants else 0
+            }
+
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+
+    def generate_audit_memo(self, clinic_id: str, audit_year: int, audit_type: str = 'Annual', output_dir: str = None) -> dict:
+        """
+        Generate a filled audit completion memo document.
+
+        PURPOSE: Create a ready-to-sign compliance memo from template
+
+        PARAMETERS:
+            clinic_id: The clinic's ID
+            audit_year: Year of the audit
+            audit_type: 'Annual' or 'Quarterly'
+            output_dir: Directory to save file (default: ~/Downloads)
+
+        RETURNS:
+            dict with success status and file path
+
+        WHY THIS APPROACH:
+            We use docxtpl (Jinja2 for Word) to fill placeholders in a template.
+            This separates document formatting from data, making it easy to
+            update the template without changing code.
+
+        EXAMPLE:
+            result = am.generate_audit_memo('KADLEC-001', 2025, 'Annual')
+            print(result['filepath'])  # ~/Downloads/Kadlec_Audit_Memo_2025_Annual.docx
+        """
+        try:
+            from docxtpl import DocxTemplate
+            from datetime import datetime
+
+            # Get all the data
+            data = self.get_audit_completion(clinic_id, audit_year, audit_type)
+            if not data.get('success'):
+                return data
+
+            # Format dates for display
+            def format_date(date_str):
+                if not date_str:
+                    return '(Not Set)'
+                try:
+                    dt = datetime.strptime(date_str, '%Y-%m-%d')
+                    return dt.strftime('%B %d, %Y')  # e.g., "December 17, 2025"
+                except:
+                    return date_str
+
+            # Prepare template context with all placeholders
+            context = {
+                'clinic_name': data['clinic_name'],
+                'audit_year': data['audit_year'],
+                'audit_type': data['audit_type'],
+                'document_version': data['document_version'] or '1.0',
+                'date_initiated': format_date(data['date_initiated']),
+                'date_reviewed': format_date(data['date_reviewed']),
+                'date_finalized': format_date(data['date_finalized']),
+                'date_tickets_submitted': format_date(data['date_tickets_submitted']),
+                'date_confirmed': format_date(data['date_confirmed']),
+                'ticket_number': data['ticket_number'] or '(Not Set)',
+                'manager_name': data['manager_name'],
+                'manager_email': data['manager_email'],
+                'total_reviewed': data['total_reviewed'],
+                'revocations': data['revocations'],
+                'modifications': data['modifications'],
+                'new_requests': data['new_requests']
+            }
+
+            # Load template
+            template_path = os.path.expanduser(
+                '~/projects/configurations_toolkit/templates/audit_completion_memo.docx'
+            )
+
+            if not os.path.exists(template_path):
+                return {'success': False, 'error': f'Template not found: {template_path}'}
+
+            doc = DocxTemplate(template_path)
+            doc.render(context)
+
+            # Save output
+            if output_dir:
+                out_path = os.path.expanduser(output_dir)
+            else:
+                out_path = os.path.expanduser('~/Downloads')
+            os.makedirs(out_path, exist_ok=True)
+
+            # Create filename from clinic name
+            safe_clinic = data['clinic_name'].replace(' ', '_').replace('/', '-')
+            filename = f"{safe_clinic}_Audit_Memo_{audit_year}_{audit_type}.docx"
+            filepath = os.path.join(out_path, filename)
+
+            doc.save(filepath)
+
+            return {
+                'success': True,
+                'filepath': filepath,
+                'clinic_name': data['clinic_name'],
+                'audit_year': audit_year,
+                'audit_type': audit_type
+            }
+
+        except ImportError:
+            return {'success': False, 'error': 'docxtpl not installed. Run: pip install docxtpl'}
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+
+    # =========================================================================
     # HELPER METHODS
     # =========================================================================
 
