@@ -10,6 +10,30 @@
 -- AVIATION ANALOGY: Like aircraft configuration sheets that inherit
 -- from type certificate defaults but can be overridden per tail number
 -- ============================================================================
+--
+-- SHARED TABLES DOCUMENTATION (REDUNDANCY FIX)
+-- ============================================================================
+-- The following tables are SHARED between multiple toolkits:
+--
+--   TABLE NAME       | AUTHORITATIVE SCHEMA  | ALSO USED BY
+--   -----------------+-----------------------+---------------------------
+--   clients          | config_schema.sql     | requirements_toolkit
+--   programs         | config_schema.sql     | requirements_toolkit
+--   audit_history    | config_schema.sql     | requirements_toolkit
+--
+-- All toolkits use the same database file: client_product_database.db
+--
+-- IMPORTANT: When modifying shared table schemas:
+--   1. Update this file (config_schema.sql) as the authoritative source
+--   2. Ensure requirements_toolkit/database/schema.sql stays compatible
+--   3. Use ALTER TABLE for live database migrations
+--   4. The CREATE TABLE IF NOT EXISTS pattern ensures first-loaded wins
+--
+-- PHONE FIELDS CLARIFICATION:
+--   - clinics.phone = Main clinic office number
+--   - config_values.helpdesk_phone = Patient-facing helpline (if different)
+--   - providers.phone = Direct provider contact number
+-- ============================================================================
 
 -- ----------------------------------------------------------------------------
 -- BASE TABLES (shared with Requirements Toolkit)
@@ -130,7 +154,14 @@ CREATE TABLE IF NOT EXISTS locations (
     -- Location identification
     name TEXT NOT NULL,                    -- "PCI Breast Surgery West"
     code TEXT,                             -- Service location code: "4000045001"
-    address TEXT,                          -- Physical address
+
+    -- REDUNDANCY FIX: Normalized address fields (match clinics/providers structure)
+    -- Legacy 'address' column kept for backward compatibility
+    address TEXT,                          -- Legacy: Full address as single string
+    address_street TEXT,                   -- Normalized: Street address
+    address_city TEXT,                     -- Normalized: City
+    address_state TEXT,                    -- Normalized: State (2-letter code)
+    address_zip TEXT,                      -- Normalized: ZIP code
 
     -- Status tracking
     status TEXT DEFAULT 'Active',          -- 'Active', 'Inactive', 'Archived'
@@ -248,6 +279,16 @@ CREATE TABLE IF NOT EXISTS providers (
     npi TEXT,                              -- National Provider Identifier
     role TEXT,                             -- 'Ordering Provider', 'Supervising', 'Attending'
     specialty TEXT,                        -- 'Breast Surgery', 'Oncology', etc.
+
+    -- REDUNDANCY FIX: Contact information (previously added via ALTER TABLE in propel_mcp)
+    phone TEXT,                            -- Provider's direct phone number
+    email TEXT,                            -- Provider's email address
+
+    -- REDUNDANCY FIX: Office address (normalized fields matching clinics/locations)
+    office_street TEXT,                    -- Street address
+    office_city TEXT,                      -- City
+    office_state TEXT,                     -- State (2-letter code)
+    office_zip TEXT,                       -- ZIP code
 
     -- Status
     is_active BOOLEAN DEFAULT TRUE,        -- Soft delete - set to FALSE instead of deleting
