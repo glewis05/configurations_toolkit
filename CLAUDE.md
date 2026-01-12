@@ -17,12 +17,46 @@ This toolkit:
 - Aviation background — aviation analogies work well for complex concepts
 - Prefers detailed explanations with heavy inline comments
 
-## Shared Database
+## Database Architecture
 
-Uses the same Client Product Database as Requirements Toolkit:
-- Location: `~/projects/data/client_product_database.db`
-- Shared tables: `clients`, `programs`, `audit_history`
-- Config-specific tables: `clinics`, `locations`, `config_definitions`, `config_values`, `providers`
+### Unified Database Design
+
+All Propel Health toolkits share a **single unified database**:
+
+| Location | Toolkits | Purpose |
+|----------|----------|---------|
+| `~/projects/data/client_product_database.db` | All | Requirements, configurations, UAT, access management |
+
+Other toolkits use **symlinks** to access this database:
+- `~/projects/requirements_toolkit/data/client_product_database.db` → unified DB
+- `~/projects/uat_toolkit/data/client_product_database.db` → unified DB
+
+**Why unified?**
+- Programs are the central entity connecting requirements AND configurations
+- All programs have requirements (features, user stories)
+- All programs have configurations (helpdesk info, settings)
+- Some programs have clinics with clinic-specific configurations
+- Single source of truth for audit trail
+
+### Configuration Tables (this toolkit manages)
+- `clinics`, `locations` - Clinic hierarchy under programs
+- `config_definitions`, `config_values` - Configuration settings with inheritance
+- `providers`, `appointment_types` - Clinical data
+- `users`, `user_access`, `access_reviews` - Access management
+- `config_history` - Configuration change tracking
+
+### Shared Tables
+- `programs` - All programs (P4M, Px4M, ONB, etc.) - shared with all toolkits
+- `clients` - Client organizations
+- `audit_history` - Unified audit trail for compliance
+
+### Requirements Tables (requirements_toolkit manages)
+- `requirements`, `user_stories` - What to build
+- `uat_test_cases`, `uat_cycles` - Testing (UAT toolkit extends)
+- `traceability`, `compliance_gaps` - Coverage tracking
+
+### MCP Server Integration
+The `propel_mcp` server connects to the unified database for all operations.
 
 ## Code Standards
 
