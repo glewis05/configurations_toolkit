@@ -482,3 +482,163 @@ JOIN locations l ON l.location_id = pr.location_id
 JOIN clinics c ON c.clinic_id = l.clinic_id
 JOIN programs p ON p.program_id = c.program_id
 ORDER BY p.name, c.name, l.name, pr.name;
+
+-- ============================================================================
+-- ONBOARDING PROJECT MANAGEMENT TABLES
+-- Tracks clinic/location onboarding lifecycle from intake to launch
+-- ============================================================================
+
+-- ----------------------------------------------------------------------------
+-- ONBOARDING PROJECTS
+-- Main project tracking for clinic onboarding
+-- ----------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS onboarding_projects (
+    project_id TEXT PRIMARY KEY,                    -- ONB-<CLINIC>-<YYYYMM>
+    program_id TEXT NOT NULL,                       -- FK to programs
+    clinic_id TEXT,                                 -- FK to clinics (if existing)
+
+    -- Project identification
+    project_name TEXT NOT NULL,                     -- "Portland Clinic Onboarding"
+    clinic_name TEXT NOT NULL,                      -- For display before clinic_id exists
+
+    -- Status tracking
+    status TEXT DEFAULT 'INTAKE',                   -- INTAKE, IN_PROGRESS, UAT_READY, LAUNCHED, ON_HOLD
+    target_launch_date DATE,                        -- Goal date
+    actual_launch_date DATE,                        -- When actually launched
+
+    -- Key contacts
+    client_contact_name TEXT,                       -- Primary client contact
+    client_contact_email TEXT,
+    propel_lead TEXT,                               -- Propel project lead
+
+    -- Notes
+    notes TEXT,
+
+    -- Audit fields
+    created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    created_by TEXT DEFAULT 'system',
+    updated_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+
+    FOREIGN KEY (program_id) REFERENCES programs(program_id),
+    FOREIGN KEY (clinic_id) REFERENCES clinics(clinic_id)
+);
+
+-- Indexes for onboarding_projects
+CREATE INDEX IF NOT EXISTS idx_onboarding_status ON onboarding_projects(status);
+CREATE INDEX IF NOT EXISTS idx_onboarding_program ON onboarding_projects(program_id);
+CREATE INDEX IF NOT EXISTS idx_onboarding_target_date ON onboarding_projects(target_launch_date);
+
+-- ----------------------------------------------------------------------------
+-- ONBOARDING MILESTONES
+-- Standard milestones for each onboarding project
+-- ----------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS onboarding_milestones (
+    milestone_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id TEXT NOT NULL,                       -- FK to onboarding_projects
+
+    -- Milestone definition
+    milestone_type TEXT NOT NULL,                   -- QUESTIONNAIRE, KICKOFF, CONFIGURATION, EXTRACT_VALIDATED, USERS, TRAINING, UAT, GO_LIVE
+    milestone_name TEXT NOT NULL,                   -- Display name
+    sequence_order INTEGER NOT NULL,                -- Order in timeline (1-8)
+
+    -- Status tracking
+    status TEXT DEFAULT 'NOT_STARTED',              -- NOT_STARTED, IN_PROGRESS, COMPLETE, BLOCKED
+
+    -- Dates
+    target_date DATE,                               -- When we're aiming to complete
+    actual_completion_date DATE,                    -- When actually completed
+
+    -- Completion tracking
+    completed_by TEXT,                              -- Who completed it
+
+    -- Auto-verification (for milestones that can be auto-checked)
+    auto_verify_type TEXT,                          -- CONFIG_EXISTS, EXTRACT_VALID, USERS_EXIST, TRAINING_COMPLETE, TESTS_PASSING
+    auto_verified_date TIMESTAMP,                   -- When auto-verification last ran
+    auto_verified_result BOOLEAN,                   -- TRUE if passed
+
+    -- Notes
+    notes TEXT,
+    blocker_reason TEXT,                            -- If BLOCKED, why
+
+    -- Audit fields
+    created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+
+    FOREIGN KEY (project_id) REFERENCES onboarding_projects(project_id),
+
+    -- Each milestone type only once per project
+    UNIQUE(project_id, milestone_type)
+);
+
+-- Indexes for onboarding_milestones
+CREATE INDEX IF NOT EXISTS idx_milestones_project ON onboarding_milestones(project_id);
+CREATE INDEX IF NOT EXISTS idx_milestones_status ON onboarding_milestones(status);
+CREATE INDEX IF NOT EXISTS idx_milestones_type ON onboarding_milestones(milestone_type);
+
+-- ----------------------------------------------------------------------------
+-- ONBOARDING DEPENDENCIES
+-- External dependencies blocking milestones
+-- ----------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS onboarding_dependencies (
+    dependency_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id TEXT NOT NULL,                       -- FK to onboarding_projects
+    milestone_id INTEGER,                           -- FK to onboarding_milestones (optional)
+
+    -- Dependency definition
+    dependency_type TEXT NOT NULL,                  -- EPIC_EXTRACT, AWS_APPROVAL, LEGAL_REVIEW, TRAINING_SCHEDULE, CLIENT_SIGN_OFF, OTHER
+    description TEXT NOT NULL,                      -- "EPIC build ticket #12345"
+
+    -- External reference
+    external_reference TEXT,                        -- Ticket number, case number, etc.
+    external_system TEXT,                           -- "EPIC", "Salesforce", "Jira", etc.
+
+    -- Owner/Contact
+    owner TEXT,                                     -- Who is responsible for resolving
+    owner_email TEXT,
+
+    -- Status tracking
+    status TEXT DEFAULT 'PENDING',                  -- PENDING, IN_PROGRESS, RESOLVED, CANCELLED
+
+    -- Dates
+    due_date DATE,                                  -- When dependency needs to be resolved
+    resolved_date DATE,                             -- When actually resolved
+    resolved_by TEXT,                               -- Who resolved it
+    resolution_notes TEXT,                          -- How it was resolved
+
+    -- Audit fields
+    created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    created_by TEXT DEFAULT 'system',
+    updated_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+
+    FOREIGN KEY (project_id) REFERENCES onboarding_projects(project_id),
+    FOREIGN KEY (milestone_id) REFERENCES onboarding_milestones(milestone_id)
+);
+
+-- Indexes for onboarding_dependencies
+CREATE INDEX IF NOT EXISTS idx_dependencies_project ON onboarding_dependencies(project_id);
+CREATE INDEX IF NOT EXISTS idx_dependencies_status ON onboarding_dependencies(status);
+CREATE INDEX IF NOT EXISTS idx_dependencies_milestone ON onboarding_dependencies(milestone_id);
+CREATE INDEX IF NOT EXISTS idx_dependencies_due ON onboarding_dependencies(due_date);
+
+-- View: Onboarding project summary with progress
+CREATE VIEW IF NOT EXISTS v_onboarding_progress AS
+SELECT
+    op.project_id,
+    op.project_name,
+    op.clinic_name,
+    op.status AS project_status,
+    op.target_launch_date,
+    op.propel_lead,
+    p.name AS program_name,
+    p.prefix AS program_prefix,
+    (SELECT COUNT(*) FROM onboarding_milestones om
+     WHERE om.project_id = op.project_id AND om.status = 'COMPLETE') AS completed_milestones,
+    (SELECT COUNT(*) FROM onboarding_milestones om
+     WHERE om.project_id = op.project_id) AS total_milestones,
+    (SELECT COUNT(*) FROM onboarding_dependencies od
+     WHERE od.project_id = op.project_id AND od.status != 'RESOLVED') AS pending_dependencies
+FROM onboarding_projects op
+JOIN programs p ON op.program_id = p.program_id;
